@@ -1,0 +1,926 @@
+---
+title: "Optimal Portfolios: Mean-Variance, CAPM and Shrinkage"
+subtitle: "Maastricht University, eLab Business Case"
+author: "Francisca (Kika) Freixo"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 6
+    code_folding: hide
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+library(quantmod)
+library(psych)
+library(DescTools)
+library(quadprog)
+library(dplyr)
+library(xts)
+library(tibble)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(knitr)
+library(kableExtra)
+```
+
+# 2. Assignment
+# 2.1 - Data
+## Question 9 
+To ensure consistency with the stock return data, the annualized percentage risk-free rate must be transformed into a daily or monthly decimal rate by dividing it by 100 and then dividing by 252 for daily returns. This transformation aligns the units of the risk-free rate with those of the stock returns, enabling accurate calculation of excess returns and portfolio optimization.
+Right now, my stock returns are in daily returns, while the risk-free rate is an annualized percentage, so I will convert the risk-free rate to daily returns. 
+
+```{r - Question 9 }
+tickers <- read.csv("data/teamticker.csv", header = TRUE)
+symbols <- na.omit(as.character(tickers$D))  # Team D
+
+getSymbols(symbols, from = "2003-12-31")
+prices    <- do.call(merge, lapply(symbols, function(sym) Ad(get(sym))))
+
+returns   <- ROC(prices, type = "discrete")
+
+getSymbols("DTB3", src = "FRED", from = "2003-12-31")
+rf_daily  <- DTB3 / 100 / 252    # percent → decimal, annual → daily
+colnames(rf_daily) <- "rf"
+
+rf_filled <- na.locf(rf_daily)
+rf_lagged <- xts::lag.xts(rf_filled, k = 1)
+
+rf_aligned  <- rf_lagged[index(returns)]
+data_merged <- na.omit(merge(returns, rf_aligned))
+
+head(data_merged)
+
+returns <- returns[index(rf_aligned)]  # Trim returns to match rf
+
+rf_matrix <- matrix(rep(coredata(rf_aligned), ncol(returns)),
+                    nrow = nrow(returns), ncol = ncol(returns))
+
+excess_returns <- returns - rf_matrix
+colnames(excess_returns) <- colnames(returns)
+
+```
+ 
+# 2.2 + 2.3 - Mean Variance Problem + Cross Validation
+## Question 10
+To begin Question 10, I split the dataset into two subsets: observations from odd days and the other from even days. This creates two independent samples that can be used for cross-validation.
+
+Next, I calculated the average excess returns and standard deviations for each stock separately within the odd and even subsamples. This provides two sets of statistics, one per subsample, to compare the consistency of the return distribution over time.
+
+To see how similar the estimates are between the two folds, I plot the mean returns of the odd subsample on the x-axis and the even subsample on the y-axis. I repeat this procedure for the standard deviations. If the points lie close to the 45-degree line, it shows consistency between the subsamples.
+
+```{r - merge riskfree rate and the stock return data }
+# Step 1: Create ODD and EVEN subsets (row-wise)
+odd_index <- seq(1, nrow(excess_returns), by = 2)
+even_index <- seq(2, nrow(excess_returns), by = 2)
+
+excess_odd <- excess_returns[odd_index, ]
+excess_even <- excess_returns[even_index, ]
+
+# Step 2: Compute column-wise means and standard deviations
+mean_odd <- colMeans(excess_odd, na.rm = TRUE)
+mean_even <- colMeans(excess_even, na.rm = TRUE)
+
+sd_odd <- apply(excess_odd, 2, sd, na.rm = TRUE)
+sd_even <- apply(excess_even, 2, sd, na.rm = TRUE)
+
+# Step 3: Combine means and SDs into data frames for plotting
+df_mean <- data.frame(Mean_Odd = mean_odd, Mean_Even = mean_even)
+df_sd   <- data.frame(SD_Odd = sd_odd, SD_Even = sd_even)
+
+
+ggplot(df_mean, aes(x = Mean_Odd, y = Mean_Even)) +
+  geom_point(color = "blue", size = 2) +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  labs(title = "Means: ODD vs EVEN samples",
+       x = "Mean (Odd days)",
+       y = "Mean (Even days)") +
+  theme_minimal()
+
+# Step 5: Plot standard deviations
+ggplot(df_sd, aes(x = SD_Odd, y = SD_Even)) +
+  geom_point(color = "darkgreen", size = 2) +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  labs(title = "Standard Deviations: ODD vs EVEN samples",
+       x = "SD (Odd days)",
+       y = "SD (Even days)") +
+  theme_minimal()
+
+
+```
+The means differ between odd and even samples, as seen by the scatter around the 45-degree line. This suggests that average excess returns change a lot across subsamples, indicating noise in the data and potential overfitting risk when using raw means.
+
+Standard deviations are much more consistent across samples, the points are closely aligned to the 45-degree line. This indicates that volatility is stable and more reliable than mean returns for portfolio input.
+
+### Would you expect significant differences?
+To test whether the average excess returns differ significantly between odd and even days, I computed the difference in means for each stock and ran a paired t-test. This test assesses whether the mean of the differences is statistically different from zero. I also visualized the distribution of these differences using a histogram.
+
+
+```{r - paired t-test}
+#checking for significance in means
+mean_diff <- mean_odd - mean_even
+
+t_result <- t.test(mean_odd, mean_even, paired = TRUE)
+
+print(t_result)
+
+hist(mean_diff, breaks = 10, main = "Histogram of Mean Differences (ODD - EVEN)",
+     xlab = "Difference in Mean Excess Return", col = "lightblue")
+
+
+```
+
+The paired t-test returned a p-value of 0.30, which is above the 0.05 significance level. This means we fail to reject the null hypothesis that the mean difference is zero. This is also seen in the histogram, which shows differences centered around zero, we conclude that there is no significant evidence of difference in mean excess returns between odd and even samples.
+
+## Question 11
+In Question 11, I constructed four optimized portfolios using mean-variance analysis. First, I built two portfolios using the odd and even subsamples separately, allowing short-selling (so weights could be negative). Then, I repeated the same process but with short-selling not allowed, meaning all portfolio weights had to be zero or positive. In all portfolios, I included the risk-free asset by optimizing based on excess returns. This allowed me to compare how the portfolios differ depending on the data sample and whether or not short-selling is permitted.  This resulted in four distinct portfolios with four differnt weights.
+
+```{r}
+gamma <- 3 
+
+optimize_portfolio <- function(R, short_selling = TRUE) {
+  R <- R[complete.cases(R), ]
+  
+  mu <- colMeans(R)
+  S <- cov(R, use = "pairwise.complete.obs")
+  S <- S + diag(1e-6, ncol(S))
+  
+  N <- ncol(S)
+  Dmat <- 2 * gamma * S  
+  dvec <- mu
+  
+  if (short_selling) {
+    Amat <- diag(N)
+    bvec <- rep(-1e10, N)  
+    meq <- 0
+  } else {
+    Amat <- diag(N)
+    bvec <- rep(0, N)
+    meq <- 0
+  }
+  
+  result <- solve.QP(Dmat, dvec, Amat, bvec, meq)
+  weights <- result$solution
+  names(weights) <- colnames(R)
+  return(weights)
+}
+
+
+```
+
+Lastly, I printed out the weights for each portfolio and calculated the weight allocated to the risk-free asset, using the fact that the remaining weight not invested in risky assets is automatically allocated there.
+
+```{r}
+odd_index <- seq(1, nrow(excess_returns), by = 2)
+even_index <- seq(2, nrow(excess_returns), by = 2)
+
+excess_odd <- excess_returns[odd_index, ]
+excess_even <- excess_returns[even_index, ]
+
+excess_odd <- excess_odd[complete.cases(excess_odd), ]
+excess_even <- excess_even[complete.cases(excess_even), ]
+
+w_odd_free     <- optimize_portfolio(excess_odd,  short_selling = TRUE)
+w_odd_noshort  <- optimize_portfolio(excess_odd,  short_selling = FALSE)
+
+w_even_free    <- optimize_portfolio(excess_even, short_selling = TRUE)
+w_even_noshort <- optimize_portfolio(excess_even, short_selling = FALSE)
+
+
+print_weights <- function(w, title = "Portfolio Weights") {
+  df <- tibble(
+    Asset = names(w),
+    Weight = round(w, 3)
+  ) %>%
+    filter(Weight != 0) %>%
+    arrange(desc(abs(Weight)))
+  kable(df, format = "html", caption = title) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = F)
+}
+
+print_weights(w_odd_free, "ODD Sample - Short-Selling Allowed")
+print_weights(w_odd_noshort, "ODD Sample - No Short-Selling")
+print_weights(w_even_free, "EVEN Sample - Short-Selling Allowed")
+print_weights(w_even_noshort, "EVEN Sample - No Short-Selling")
+
+weight_riskfree_odd_free     <- 1 - sum(w_odd_free)
+weight_riskfree_odd_noshort  <- 1 - sum(w_odd_noshort)
+weight_riskfree_even_free    <- 1 - sum(w_even_free)
+weight_riskfree_even_noshort <- 1 - sum(w_even_noshort)
+
+
+cat("Weight in risk-free asset (ODD, short):", round(weight_riskfree_odd_free, 3), "\n")
+cat("Weight in risk-free asset (ODD, no short):", round(weight_riskfree_odd_noshort, 3), "\n")
+cat("Weight in risk-free asset (EVEN, short):", round(weight_riskfree_even_free, 3), "\n")
+cat("Weight in risk-free asset (EVEN, no short):", round(weight_riskfree_even_noshort, 3), "\n")
+
+#cat("**Weight in risk-free asset:**", round(weight_riskfree, 3), "\n")
+
+```
+From the results, we saw that the asset weights vary considerably across the different portfolio configurations, especially depending on whether short-selling is allowed or not. Some portfolios have negative weights, which implies short positions, while others assign zero or positive weights only. The calculated weight for the risk-free asset was negative in one case, meaning borrowing at the risk-free rate to invest more in risky assets. Overall, the composition of portfolios is sensitive to the short-selling constraint, which may affect both diversification and risk exposure. 
+I then thought it was easier to interpret these numbers if it there was a visual element to it so created the bar plots to see them better.
+
+### Bar Plots
+```{r}
+weights_df <- data.frame(
+  Ticker = names(w_odd_free),
+  Odd_Short        = w_odd_free,
+  Odd_NoShort      = w_odd_noshort,
+  Even_Short       = w_even_free,
+  Even_NoShort     = w_even_noshort
+)
+
+weights_long <- weights_df %>%
+  pivot_longer(cols = -Ticker, names_to = "Portfolio", values_to = "Weight") %>%
+  mutate(Sign = ifelse(Weight >= 0, "Positive", "Negative"))
+
+plot_portfolio_weights <- function(data, title) {
+  ggplot(data, aes(x = Ticker, y = Weight, fill = Sign)) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values = c("Positive" = "darkgreen", "Negative" = "red")) +
+    theme_minimal() +
+    labs(title = title, x = "", y = "Weight") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(size = 14, face = "bold"))
+}
+
+plot_odd_short      <- plot_portfolio_weights(filter(weights_long, Portfolio == "Odd_Short"),     "ODD Fold – Short-Selling Allowed")
+plot_odd_noshort    <- plot_portfolio_weights(filter(weights_long, Portfolio == "Odd_NoShort"),   "ODD Fold – No Short-Selling")
+plot_even_short     <- plot_portfolio_weights(filter(weights_long, Portfolio == "Even_Short"),    "EVEN Fold – Short-Selling Allowed")
+plot_even_noshort   <- plot_portfolio_weights(filter(weights_long, Portfolio == "Even_NoShort"),  "EVEN Fold – No Short-Selling")
+
+print(plot_odd_short)
+print(plot_odd_noshort)
+print(plot_even_short)
+print(plot_even_noshort)
+
+```
+
+## Question 12
+
+In Question 12, I evaluated the performance of the optimized portfolios from Question 11. For each portfolio, I calculated the expected excess return and standard deviation in the training sample (where it was optimized). Then, I tested each portfolio's performance in the validation sample, I did this by applying the weights obtained from one fold to the returns of the other fold. This gave me a view of how well the optimized portfolio generalized to new data.
+
+```{r}
+evaluate_portfolio <- function(w, returns) {
+  port_returns <- returns %*% w
+  mean <- mean(port_returns)
+  sd <- sd(port_returns)
+  sharpe <- mean / sd
+  return(list(mean = mean, sd = sd, sharpe = sharpe))
+}
+
+
+```
+
+```{r}
+# in-sample
+perf_odd_free     <- evaluate_portfolio(w_odd_free, excess_odd)
+perf_odd_noshort  <- evaluate_portfolio(w_odd_noshort, excess_odd)
+perf_even_free    <- evaluate_portfolio(w_even_free, excess_even)
+perf_even_noshort <- evaluate_portfolio(w_even_noshort, excess_even)
+
+# out-of-sample
+val_odd_free     <- evaluate_portfolio(w_odd_free, excess_even)
+val_odd_noshort  <- evaluate_portfolio(w_odd_noshort, excess_even)
+val_even_free    <- evaluate_portfolio(w_even_free, excess_odd)
+val_even_noshort <- evaluate_portfolio(w_even_noshort, excess_odd)
+
+```
+
+After calculating the portfolio’s excess return and standard deviation for both the training and validation samples, I annualized the results. To do this, I multiplied the average daily return by 252 (the approximate number of trading days in a year), and multiplied the daily standard deviation by √252. This ensures the performance metrics are on a comparable annual scale.
+To summarize the results, I created tables showing the average excess return, standard deviation, and Sharpe ratio for all four portfolios, both in-sample and out-of-sample.
+
+
+```{r}
+annualize <- function(perf) {
+  list(
+    mean   = perf$mean * 252,
+    sd     = perf$sd * sqrt(252),
+    sharpe = perf$sharpe
+  )
+}
+
+perf_odd_free_annual     <- annualize(perf_odd_free)
+perf_odd_noshort_annual  <- annualize(perf_odd_noshort)
+perf_even_free_annual    <- annualize(perf_even_free)
+perf_even_noshort_annual <- annualize(perf_even_noshort)
+
+val_odd_free_annual     <- annualize(val_odd_free)
+val_odd_noshort_annual  <- annualize(val_odd_noshort)
+val_even_free_annual    <- annualize(val_even_free)
+val_even_noshort_annual <- annualize(val_even_noshort)
+
+results_annual <- data.frame(
+  Portfolio = rep(c("ODD - short", "ODD - no short", "EVEN - short", "EVEN - no short"), each = 2),
+  Evaluation = rep(c("In-sample", "Out-of-sample"), times = 4),
+  AnnualReturn = c(
+    perf_odd_free_annual$mean, val_odd_free_annual$mean,
+    perf_odd_noshort_annual$mean, val_odd_noshort_annual$mean,
+    perf_even_free_annual$mean, val_even_free_annual$mean,
+    perf_even_noshort_annual$mean, val_even_noshort_annual$mean
+  ),
+  AnnualSD = c(
+    perf_odd_free_annual$sd, val_odd_free_annual$sd,
+    perf_odd_noshort_annual$sd, val_odd_noshort_annual$sd,
+    perf_even_free_annual$sd, val_even_free_annual$sd,
+    perf_even_noshort_annual$sd, val_even_noshort_annual$sd
+  ),
+  SharpeRatio = c(
+    perf_odd_free_annual$sharpe, val_odd_free_annual$sharpe,
+    perf_odd_noshort_annual$sharpe, val_odd_noshort_annual$sharpe,
+    perf_even_free_annual$sharpe, val_even_free_annual$sharpe,
+    perf_even_noshort_annual$sharpe, val_even_noshort_annual$sharpe
+  )
+)
+
+results_annual_rounded <- results_annual
+results_annual_rounded[, c("AnnualReturn", "AnnualSD", "SharpeRatio")] <-
+  round(results_annual_rounded[, c("AnnualReturn", "AnnualSD", "SharpeRatio")], 3)
+
+extract_metric_table <- function(df, portfolio_type, metric_col) {
+  matrix(c(
+    df[df$Portfolio == paste0("ODD - ", portfolio_type) & df$Evaluation == "In-sample", metric_col],
+    df[df$Portfolio == paste0("ODD - ", portfolio_type) & df$Evaluation == "Out-of-sample", metric_col],
+    df[df$Portfolio == paste0("EVEN - ", portfolio_type) & df$Evaluation == "In-sample", metric_col],
+    df[df$Portfolio == paste0("EVEN - ", portfolio_type) & df$Evaluation == "Out-of-sample", metric_col]
+  ), nrow = 2, byrow = TRUE,
+  dimnames = list(c("ODD", "EVEN"), c("ODD Eval", "EVEN Eval")))
+}
+
+sharpe_unconstr <- extract_metric_table(results_annual_rounded, "short", "SharpeRatio")
+return_unconstr <- extract_metric_table(results_annual_rounded, "short", "AnnualReturn")
+sd_unconstr     <- extract_metric_table(results_annual_rounded, "short", "AnnualSD")
+
+cat("### Unconstrained Portfolios (Short-Selling Allowed)\n\n")
+
+kable(sharpe_unconstr, caption = "Sharpe Ratios (Unconstrained)") %>% kable_styling()
+kable(return_unconstr, caption = "Annual Returns (Unconstrained)") %>% kable_styling()
+kable(sd_unconstr, caption = "Annual Std Dev (Unconstrained)") %>% kable_styling()
+
+sharpe_constr <- extract_metric_table(results_annual_rounded, "no short", "SharpeRatio")
+return_constr <- extract_metric_table(results_annual_rounded, "no short", "AnnualReturn")
+sd_constr     <- extract_metric_table(results_annual_rounded, "no short", "AnnualSD")
+
+cat("\n\n### Constrained Portfolios (No Short-Selling)\n\n")
+
+kable(sharpe_constr, caption = "Sharpe Ratios (Constrained)") %>% kable_styling()
+kable(return_constr, caption = "Annual Returns (Constrained)") %>% kable_styling()
+kable(sd_constr, caption = "Annual Std Dev (Constrained)") %>% kable_styling()
+
+```
+
+**Conclusions**
+**Unconstrained portfolios**
+The Sharpe ratios for unconstrained portfolios show a worse performance from the in-sample result to the out-of-sample performance. For example, the ODD fold drops from 0.127 to 0.008, and the EVEN fold drops from 0.090 to 0.027. This is a very significant decline, and it suggests that the portfolios are overfitted to their training data and therefore fail to maintain their performance when evaluated on new data.
+
+The annual returns follow the same trend. The ODD portfolio achieves a high 67.2% in-sample return, but only 4.2% out-of-sample. The EVEN portfolio drops from 33.6% to 10.4%. This shows that although these portfolios appear to be very profitable during optimization, they do not maintain these results, again might be overfitting.
+
+Despite the large differences in return and Sharpe ratio, the standard deviations for unconstrained portfolios remain quite stable. For ODD, the standard deviation is 33.3% in-sample and 33.2% out-of-sample, whilst for EVEN, it goes from 23.6% to 24.3%. This indicates that the level of risk remains the same, but the rewards do not, this makes the reliability of these portfolios worse.
+
+**Constrained portfolios**
+Constrained portfolios, show much more consistent Sharpe ratios. ODD goes from 0.090 to 0.056, and EVEN from 0.075 to 0.050. These smaller declines indicate that constrained portfolios are more robust and generalize better when applied to new data, with less susceptibility to overfitting.
+
+The annual returns for constrained portfolios also is able to demonstrate more stability. The ODD portfolio decreases from 34.3% to 20.1%, and the EVEN portfolio from 23.3% to 17.1%. Compared to the unconstrained portoflios, these returns are lower but also more reliable in both training and validation sets.
+
+Risk, as measured by standard deviation, is also more consistent and lower in the constrained portfolios. The ODD fold drops slightly from 23.9% to 22.5%, and the EVEN fold from 19.7% to 21.6%. These results suggest that constrained portfolios maintain not only more stable returns but also a more predictable risk level.
+
+### Bar Plots
+We also thought that turning these numbers into visualizations would greatly improve and ease the understanding of them, so below you can see these same numbers and conclusions but in a visual way.
+
+```{r}
+metrics <- c("AnnualReturn", "AnnualSD", "SharpeRatio")
+
+for (metric in metrics) {
+  p <- ggplot(results_annual_rounded, aes_string(x = "Portfolio", y = metric, fill = "Evaluation")) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = paste(metric, "by Portfolio"),
+         y = metric, x = "Portfolio") +
+    theme_minimal() +
+    scale_fill_manual(values = c("In-sample" = "steelblue", "Out-of-sample" = "darkorange")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  print(p)
+}
+
+
+```
+
+## Question 13
+Based on theory, asset weights are given to maximize the portfolio’s expected return for a given level of risks. SPY, like all other asset in the portfolio, is evaluated purely on its statistical contribution to risk and return. Therefore, unless SPY demonstrates a very high return or offers strong diversification relative to the other assets, its optimal weight is expected to be low. If short-selling is allowed and SPY is not favorable in terms of its return-to-risk profile, the optimizer may even assign it a negative weight. This approach differs with CAPM-based models, where SPY would receive more weight due to its role as the market proxy.
+
+
+```{r}
+spy_name <- "SPY.Adjusted"
+
+cat("SPY weight in w_odd_free:    ", round(w_odd_free[spy_name], 4), "\n")
+cat("SPY weight in w_odd_noshort: ", round(w_odd_noshort[spy_name], 4), "\n")
+cat("SPY weight in w_even_free:   ", round(w_even_free[spy_name], 4), "\n")
+cat("SPY weight in w_even_noshort:", round(w_even_noshort[spy_name], 4), "\n")
+
+
+```
+In our results, SPY received a small or negative weight in some portfolios, which aligns with theory. This means that SPY did not stand out in terms of return or diversification, so the optimizer allocated less weight to it.
+
+
+# 2.4 - CAPM BETA's
+## Question 14
+
+In Question 14, I computed the CAPM beta for each stock in my dataset. To do this, I used a regression, where I regressed the excess return of each stock on the excess return of the market - using SPY as a market proxy. 
+The slope of this regression is the coefficient on the market return and represents the stock’s beta. I performed this regression separately for the odd and even subsamples. After calculating the betas, I created a scatterplot comparing the beta values from the odd sample (x-axis) and the even sample (y-axis). This helped me visually assess how consistent the beta estimates are across the two samples.
+
+```{r}
+# Estimate betas q11
+estimate_betas <- function(returns_xts, market_name = "SPY.Adjusted") {
+  market <- returns_xts[, market_name]
+  betas <- sapply(returns_xts, function(asset) {
+    cov(asset, market, use = "complete.obs") / var(market, na.rm = TRUE)
+  })
+  return(betas)
+}
+
+betas <- estimate_betas(excess_returns)
+
+# Estimate expected SPY
+mean_market_excess_return <- mean(excess_returns[, "SPY.Adjusted"], na.rm = TRUE)
+
+# CAPM expected returns
+mu_capm <- betas * mean_market_excess_return
+
+# Optimizer using CAPM  
+optimize_portfolio_capm <- function(R, mu_override, short_selling = TRUE) {
+  R <- R[complete.cases(R), ]
+  S <- cov(R, use = "pairwise.complete.obs")
+  S <- S + diag(1e-6, ncol(S))
+  
+  N <- ncol(R)
+  Dmat <- 2 * gamma * S
+  dvec <- mu_override[colnames(R)]
+  
+  if (short_selling) {
+    Amat <- diag(N)
+    bvec <- rep(-1e10, N)
+  } else {
+    Amat <- diag(N)
+    bvec <- rep(0, N)
+  }
+
+  result <- solve.QP(Dmat, dvec, Amat, bvec, meq = 0)
+  weights <- result$solution
+  names(weights) <- colnames(R)
+  return(weights)
+}
+
+w_odd_free_capm     <- optimize_portfolio_capm(excess_odd, mu_capm, TRUE)
+w_odd_noshort_capm  <- optimize_portfolio_capm(excess_odd, mu_capm, FALSE)
+w_even_free_capm    <- optimize_portfolio_capm(excess_even, mu_capm, TRUE)
+w_even_noshort_capm <- optimize_portfolio_capm(excess_even, mu_capm, FALSE)
+
+# Weights
+## CAPM Weights
+weights_capm_df <- data.frame(
+  Ticker = names(w_odd_free_capm),
+  CAPM_Odd_Short     = round(w_odd_free_capm, 5),
+  CAPM_Odd_NoShort   = round(w_odd_noshort_capm, 5),
+  CAPM_Even_Short    = round(w_even_free_capm, 5),
+  CAPM_Even_NoShort  = round(w_even_noshort_capm, 5)
+)
+
+## Weights from Q11
+weights_q11_df <- data.frame(
+  Ticker = names(w_odd_free),
+  Empirical_Odd_Short     = round(w_odd_free, 5),
+  Empirical_Odd_NoShort   = round(w_odd_noshort, 5),
+  Empirical_Even_Short    = round(w_even_free, 5),
+  Empirical_Even_NoShort  = round(w_even_noshort, 5)
+)
+
+
+# Q11 Weights Table
+kable(weights_q11_df, format = "html", caption = "Empirical Portfolio Weights (Historical Means)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  scroll_box(width = "100%", height = "400px")
+
+# CAPM Weights Table
+kable(weights_capm_df, format = "html", caption = "CAPM-Based Portfolio Weights") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  scroll_box(width = "100%", height = "400px")
+
+```
+
+
+To further explore the validity of CAPM and the reliability of my inputs, I estimated the beta and mean excess return of each asset separately for the odd and even data folds. I then plotted the relationship between beta and average return for each fold, as well as to compare beta estimates across the two samples. This allowed me to visually understand whether the CAPM prediction, which is that higher beta should correspond to higher expected return holds in my data, and whether the beta estimates are stable across time.
+
+```{r}
+beta_odd  <- estimate_betas(excess_odd, market_name = "SPY.Adjusted")
+beta_even <- estimate_betas(excess_even, market_name = "SPY.Adjusted")
+
+mean_odd  <- colMeans(excess_odd, na.rm = TRUE)
+mean_even <- colMeans(excess_even, na.rm = TRUE)
+
+capm_odd <- data.frame(
+  Asset = names(beta_odd),
+  Beta  = beta_odd,
+  Mean  = mean_odd
+)
+
+capm_even <- data.frame(
+  Asset = names(beta_even),
+  Beta  = beta_even,
+  Mean  = mean_even
+)
+
+capm_all <- data.frame(
+  Asset     = names(beta_odd),
+  Beta_odd  = beta_odd,
+  Beta_even = beta_even
+)
+```
+
+
+### Bar Plots
+```{r}
+# Beta vs Mean (ODD)
+ggplot(capm_odd, aes(x = Beta, y = Mean, label = Asset)) +
+  geom_point(color = "blue") +
+  ggtitle("ODD Fold: Beta vs Mean Excess Return") +
+  xlab("Beta") + ylab("Mean Excess Return") +
+  theme_minimal()
+
+# Beta vs Mean (EVEN)
+ggplot(capm_even, aes(x = Beta, y = Mean, label = Asset)) +
+  geom_point(color = "green") +
+  ggtitle("EVEN Fold: Beta vs Mean Excess Return") +
+  xlab("Beta") + ylab("Mean Excess Return") +
+  theme_minimal()
+
+# Beta ODD vs EVEN
+ggplot(capm_all, aes(x = Beta_odd, y = Beta_even, label = Asset)) +
+  geom_point(color = "purple") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  ggtitle("Beta Stability: ODD vs EVEN") +
+  xlab("Beta (ODD)") + ylab("Beta (EVEN)") +
+  theme_minimal()
+```
+#### How similar are the beta estimates 
+To assess whether the beta values estimated from the odd and even samples differ significantly, I performed a paired t-test. This test compares the CAPM betas from each asset in the odd sample against the corresponding beta in the even sample. Since each asset appears in both samples, a paired test is appropriate to detect systematic differences in beta estimates.
+
+
+```{r}
+t.test(capm_all$Beta_odd, capm_all$Beta_even, paired = TRUE)
+
+```
+I ran a paired t-test to compare the CAPM betas from the odd and even samples. The very small mean difference (−0.0027) and high p-value (0.93) suggest no significant difference between them. This means the beta estimates are consistent across both samples.
+
+
+## Question 15
+In Question 15, I repeated the portfolio optimization and evaluation steps from Questions 11 and 12, but using the expected returns given by the CAPM model.
+
+```{r}
+estimate_betas <- function(R, market_name = "SPY.Adjusted") {
+  market <- R[, market_name]
+  sapply(R, function(asset) cov(asset, market, use = "complete.obs") / var(market, na.rm = TRUE))
+}
+
+betas <- estimate_betas(excess_returns)
+lambda <- mean(excess_returns[, "SPY.Adjusted"], na.rm = TRUE)  # market excess return (mean of SPY)
+mu_capm <- betas * lambda
+```
+
+```{r}
+# Optimization function using CAPM
+optimize_capm_portfolio <- function(R, mu_override, short_selling = TRUE, gamma = 3) {
+  R <- R[complete.cases(R), ]
+  S <- cov(R, use = "pairwise.complete.obs")
+  S <- S + diag(1e-6, ncol(S))
+  
+  N <- ncol(R)
+  Dmat <- 2 * gamma * S
+  dvec <- mu_override[colnames(R)]
+  Imat <- diag(N)
+  nulvec <- rep(0, N)
+
+  if (short_selling) {
+    Amat <- Imat
+    bvec <- rep(-1e10, N)
+    meq <- 0
+  } else {
+    Amat <- Imat
+    bvec <- nulvec
+    meq <- 0
+  }
+
+  sol <- solve.QP(Dmat, dvec, Amat, bvec, meq)
+  weights <- sol$solution
+  names(weights) <- colnames(R)
+  return(weights)
+}
+
+w_odd_free_capm     <- optimize_capm_portfolio(excess_odd,  mu_capm, short_selling = TRUE)
+w_odd_noshort_capm  <- optimize_capm_portfolio(excess_odd,  mu_capm, short_selling = FALSE)
+w_even_free_capm    <- optimize_capm_portfolio(excess_even, mu_capm, short_selling = TRUE)
+w_even_noshort_capm <- optimize_capm_portfolio(excess_even, mu_capm, short_selling = FALSE)
+
+
+```
+
+```{r}
+# Evaluate CAPM portfolios on in/out-of-sample
+perf_odd_free_capm     <- evaluate_portfolio(w_odd_free_capm, excess_odd)
+perf_odd_noshort_capm  <- evaluate_portfolio(w_odd_noshort_capm, excess_odd)
+perf_even_free_capm    <- evaluate_portfolio(w_even_free_capm, excess_even)
+perf_even_noshort_capm <- evaluate_portfolio(w_even_noshort_capm, excess_even)
+
+val_odd_free_capm     <- evaluate_portfolio(w_odd_free_capm, excess_even)
+val_odd_noshort_capm  <- evaluate_portfolio(w_odd_noshort_capm, excess_even)
+val_even_free_capm    <- evaluate_portfolio(w_even_free_capm, excess_odd)
+val_even_noshort_capm <- evaluate_portfolio(w_even_noshort_capm, excess_odd)
+
+annualize <- function(perf) {
+  list(
+    mean   = perf$mean * 252,
+    sd     = perf$sd * sqrt(252),
+    sharpe = perf$sharpe
+  )
+}
+
+perf_odd_free_capm_annual     <- annualize(perf_odd_free_capm)
+perf_odd_noshort_capm_annual  <- annualize(perf_odd_noshort_capm)
+perf_even_free_capm_annual    <- annualize(perf_even_free_capm)
+perf_even_noshort_capm_annual <- annualize(perf_even_noshort_capm)
+
+val_odd_free_capm_annual     <- annualize(val_odd_free_capm)
+val_odd_noshort_capm_annual  <- annualize(val_odd_noshort_capm)
+val_even_free_capm_annual    <- annualize(val_even_free_capm)
+val_even_noshort_capm_annual <- annualize(val_even_noshort_capm)
+
+```
+
+
+```{r}
+results_q15 <- data.frame(
+  Portfolio = rep(c("ODD - short", "ODD - no short", "EVEN - short", "EVEN - no short"), each = 2),
+  Evaluation = rep(c("In-sample", "Out-of-sample"), times = 4),
+  AnnualReturn = c(
+    perf_odd_free_capm_annual$mean, val_odd_free_capm_annual$mean,
+    perf_odd_noshort_capm_annual$mean, val_odd_noshort_capm_annual$mean,
+    perf_even_free_capm_annual$mean, val_even_free_capm_annual$mean,
+    perf_even_noshort_capm_annual$mean, val_even_noshort_capm_annual$mean
+  ),
+  AnnualSD = c(
+    perf_odd_free_capm_annual$sd, val_odd_free_capm_annual$sd,
+    perf_odd_noshort_capm_annual$sd, val_odd_noshort_capm_annual$sd,
+    perf_even_free_capm_annual$sd, val_even_free_capm_annual$sd,
+    perf_even_noshort_capm_annual$sd, val_even_noshort_capm_annual$sd
+  ),
+  SharpeRatio = c(
+    perf_odd_free_capm_annual$sharpe, val_odd_free_capm_annual$sharpe,
+    perf_odd_noshort_capm_annual$sharpe, val_odd_noshort_capm_annual$sharpe,
+    perf_even_free_capm_annual$sharpe, val_even_free_capm_annual$sharpe,
+    perf_even_noshort_capm_annual$sharpe, val_even_noshort_capm_annual$sharpe
+  )
+)
+
+results_q15[, 3:5] <- round(results_q15[, 3:5], 3)
+
+results_q15_odd_short    <- subset(results_q15, Portfolio == "ODD - short")
+results_q15_odd_noshort  <- subset(results_q15, Portfolio == "ODD - no short")
+results_q15_even_short   <- subset(results_q15, Portfolio == "EVEN - short")
+results_q15_even_noshort <- subset(results_q15, Portfolio == "EVEN - no short")
+
+styled_table <- function(df, caption) {
+  kable(df, format = "html", caption = caption) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+}
+
+styled_table(results_q15_odd_short,    "ODD Fold – Short-Selling Allowed (CAPM)")
+styled_table(results_q15_odd_noshort,  "ODD Fold – No Short-Selling (CAPM)")
+styled_table(results_q15_even_short,   "EVEN Fold – Short-Selling Allowed (CAPM)")
+styled_table(results_q15_even_noshort, "EVEN Fold – No Short-Selling (CAPM)")
+
+```
+
+To better interpret these, I also vizualized them.
+### Bar Plots
+```{r}
+
+for (metric in c("AnnualReturn", "AnnualSD", "SharpeRatio")) {
+  p <- ggplot(results_q15, aes_string(x = "Portfolio", y = metric, fill = "Evaluation")) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = paste(metric, "using CAPM Expected Returns"),
+         y = metric, x = "Portfolio") +
+    theme_minimal() +
+    scale_fill_manual(values = c("In-sample" = "steelblue", "Out-of-sample" = "darkorange")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  print(p)
+}
+
+
+
+```
+
+The **first graph** shows that the EVEN portfolios achieved higher in-sample returns than the ODD portfolios. Interestingly, the out-of-sample returns are higher than in-sample ones for the ODD portfolios, which is unusual and might suggest overfitting in the even fold or randomness. Overall, the EVEN - short and EVEN - no short portfolios produced the best in-sample performance, though their out-of-sample returns dropped noticeably.
+
+In terms of risk, measured by annualized standard deviation, the EVEN portfolios again show slightly higher volatility than the ODD ones. Allowing short-selling slightly increases the out-of-sample risk for EVEN portfolios, while the ODD portfolios actually saw reduced risk out-of-sample. This indicates a potential stability benefit in the ODD fold.
+The Sharpe ratio, which adjusts return for risk, highlights a key finding: the EVEN portfolios achieved better in-sample risk-adjusted performance than ODD ones, but this reverses out-of-sample. The ODD - no short portfolio had the highest out-of-sample Sharpe ratio, implying that, despite lower raw returns, it was more efficient on a risk-adjusted basis. This suggests CAPM returns may still work reasonably in practice, though their predictive consistency can vary across folds.
+
+### Comparing with Q12
+We then thought it was important to compare them with what we had gotten with the sample means, to do this we thought it easier if it was through side-by-side histograms. 
+
+```{r}
+results_q12 <- results_annual_rounded
+results_q12$Source <- "Sample Means"
+results_q15 <- results_q15
+results_q15$Source <- "CAPM"
+
+results_combined <- rbind(results_q12, results_q15)
+
+for (metric in c("AnnualReturn", "AnnualSD", "SharpeRatio")) {
+  p <- ggplot(results_combined, aes_string(x = "Portfolio", y = metric, fill = "Source")) +
+    geom_bar(stat = "identity", position = "dodge") +
+    facet_wrap(~Evaluation) +
+    labs(title = paste("Comparison:", metric, "– Sample Means vs CAPM"),
+         x = "Portfolio", y = metric) +
+    theme_minimal() +
+    scale_fill_manual(values = c("Sample Means" = "steelblue", "CAPM" = "darkorange")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  print(p)
+}
+
+```
+
+**Annual Return – Sample Means vs CAPM**
+The graph shows that portfolios based on sample means show much higher in-sample annual returns compared to those based on CAPM-implied returns. However, these sample-mean portfolios also experience a sharp drop in out-of-sample performance, suggesting overfitting. CAPM-based returns remain much more stable in both samples, indicating better generalizability but at the cost of lower returns.
+
+**Annual Standard Deviation – Sample Means vs CAPM**
+Sample-mean portfolios exhibit higher annual standard deviation (volatility) than CAPM-based portfolios across both in-sample and out-of-sample periods. CAPM portfolios maintain a lower and more consistent risk profile, which highlights CAPM's conservative nature and focus on systematic risk.
+
+**Sharpe Ratio – Sample Means vs CAPM**
+Although sample-mean portfolios achieve higher Sharpe Ratios in-sample, their performance worsens out-of-sample. In contrast, CAPM portfolios show lower but more stable Sharpe Ratios across both samples. This means that while sample means can improve performance in-sample, CAPM may offer more reliable risk-adjusted returns in real-world scenarios.
+
+### Usefulness of CAPM 
+These conclusions suggest that while CAPM-based portfolios may not deliver the highest returns in-sample, they offer more stable and consistent performance. This stability indicates that CAPM is very useful for portfolio construction, especially when the goal is to avoid overfitting and ensure that the portfolio performs well in unseen data. In real-world investing, where future returns are unknown, the generalizability and reliability of CAPM can outweigh the short-term gains offered by more volatile, sample-mean-based strategies.
+
+## Question 16
+**What happened to the weight of the ‘market portfolio’ SPY?**
+```{r}
+spy_name <- "SPY.Adjusted"
+
+spy_weights <- c(
+  Q11_Odd_Short      = w_odd_free[spy_name],
+  Q11_Odd_NoShort    = w_odd_noshort[spy_name],
+  Q11_Even_Short     = w_even_free[spy_name],
+  Q11_Even_NoShort   = w_even_noshort[spy_name],
+  Q15_Odd_Short_CAPM = w_odd_free_capm[spy_name],
+  Q15_Odd_NoShort_CAPM = w_odd_noshort_capm[spy_name],
+  Q15_Even_Short_CAPM = w_even_free_capm[spy_name],
+  Q15_Even_NoShort_CAPM = w_even_noshort_capm[spy_name]
+)
+
+spy_weights <- round(spy_weights, 4)
+print(spy_weights)
+
+```
+
+```{r}
+
+spy_df <- data.frame(
+  Portfolio = names(spy_weights),
+  SPY_Weight = as.numeric(spy_weights),
+  Source = ifelse(grepl("Q11", names(spy_weights)), "Sample Means (Q11)", "CAPM (Q15)")
+)
+
+ggplot(spy_df, aes(x = Portfolio, y = SPY_Weight, fill = Source)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Weight of SPY in Optimized Portfolios",
+       y = "Weight", x = "Portfolio") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("Sample Means (Q11)" = "darkgreen", "CAPM (Q15)" = "red"))
+
+
+
+```
+# 2.5 - Modeling 
+## Question 17
+To begin, we defined the two extremes of expected returns: the CAPM-implied returns and the historical sample means. Since they are based on different assumptions and both are imperfect, we will later combine them using shrinkage. We also extract the common assets across both sources and calculate their covariance matrices for the odd and even folds, which we will use in the optimization.
+
+```{r}
+# Shrinkage 
+sample_means <- colMeans(excess_odd, na.rm = TRUE)
+capm_means   <- mu_capm  # already defined
+common_assets <- intersect(names(sample_means), names(capm_means))
+
+sample_means <- sample_means[common_assets]
+capm_means   <- capm_means[common_assets]
+cov_odd      <- cov(excess_odd[, common_assets], use = "pairwise.complete.obs")
+cov_even     <- cov(excess_even[, common_assets], use = "pairwise.complete.obs")
+
+# Optimization function
+optimize_portfolio_with_mu <- function(mu_vec, cov_mat, short_selling = TRUE, gamma = 3) {
+  N <- length(mu_vec)
+  Dmat <- gamma * cov_mat + diag(1e-6, N)
+  dvec <- mu_vec
+  Imat <- diag(N)
+  nulvec <- rep(0, N)
+
+  if (short_selling) {
+    Amat <- Imat
+    bvec <- nulvec
+    meq  <- 0
+  } else {
+    Amat <- cbind(rep(1, N), Imat)
+    bvec <- c(1, nulvec)
+    meq  <- 1
+  }
+
+  sol <- solve.QP(Dmat, dvec, Amat, bvec, meq)
+  weights <- sol$solution
+  names(weights) <- names(mu_vec)
+  return(weights)
+}
+
+```
+
+Next, we defined a portfolio optimization function that takes in a custom expected return vector and a covariance matrix. This function supports short-selling and solves a programming problem that maximizes expected utility based on a risk aversion parameter. The resulting weights represent the optimal portfolio for any chosen expected return estimate.
+
+```{r}
+evaluate_portfolio_simple <- function(w, R) {
+  p_returns <- R %*% w
+  return(c(mean = mean(p_returns), sd = sd(p_returns), sharpe = mean(p_returns) / sd(p_returns)))
+}
+annualize_perf <- function(x) {
+  c(AnnualReturn = 252 * x["mean"], AnnualSD = sqrt(252) * x["sd"], SharpeRatio = x["sharpe"])
+}
+kappa_vals <- seq(0, 1, by = 0.25)
+results_kappa <- data.frame()
+
+for (kappa in kappa_vals) {
+  mu_shrink <- (1 - kappa) * capm_means + kappa * sample_means
+
+  w_odd_kappa <- optimize_portfolio_with_mu(mu_shrink, cov_odd, short_selling = FALSE)
+
+  in_sample  <- evaluate_portfolio_simple(w_odd_kappa, excess_odd[, common_assets])
+  out_sample <- evaluate_portfolio_simple(w_odd_kappa, excess_even[, common_assets])
+
+  results_kappa <- rbind(results_kappa,
+    data.frame(Kappa = kappa, Evaluation = "In-sample",  t(annualize_perf(in_sample))),
+    data.frame(Kappa = kappa, Evaluation = "Out-of-sample", t(annualize_perf(out_sample)))
+  )
+}
+
+
+```
+
+To evaluate how well each portfolio performs, we defined a function to calculate the mean return, risk, and the Sharpe ratio, then annualize them. We looped it over a few κ values and generatec a blended return estimates. For each κ, we compute an optimal portfolio based on the odd sample and test its performance both in-sample and out-of-sample on the even sample. These results are stored in a cumulative data frame.
+
+
+
+```{r}
+colnames(results_kappa)[grepl("AnnualReturn", colnames(results_kappa))] <- "AnnualReturn"
+colnames(results_kappa)[grepl("AnnualSD", colnames(results_kappa))]     <- "AnnualSD"
+colnames(results_kappa)[grepl("SharpeRatio", colnames(results_kappa))]  <- "SharpeRatio"
+
+results_kappa[, c("AnnualReturn", "AnnualSD", "SharpeRatio")] <-
+  round(results_kappa[, c("AnnualReturn", "AnnualSD", "SharpeRatio")], 3)
+
+results_kappa[, c("AnnualReturn", "AnnualSD", "SharpeRatio")] <- round(results_kappa[, c("AnnualReturn", "AnnualSD", "SharpeRatio")], 3)
+
+```
+
+After building the results table, we standardize and round the performance metrics for clarity. We then create a table to display the results in a readable format. To help visualize how performance changes with different values of κ, we plot three bar charts showing the Annual Return, Annual Standard Deviation, and Sharpe Ratio, each split by in-sample and out-of-sample evaluation. These visualizations will help us decide if shrinkage actually improves performance, especially in the validation data.
+This table presents how the performance of your portfolio changes as you vary the factor κ from 0 to 1:
+**κ = 0 - Pure CAPM** returns; **κ = 1 - Pure sample mean** returns.
+
+```{r}
+
+kable(results_kappa, format = "html", caption = "Portfolio Performance Across Kappa Values") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+for (metric in c("AnnualReturn", "AnnualSD", "SharpeRatio")) {
+  p <- ggplot(results_kappa, aes_string(x = "Kappa", y = metric, fill = "Evaluation")) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = paste("Performance vs Kappa:", metric),
+         x = "Shrinkage Factor (Kappa)", y = metric) +
+    theme_minimal() +
+    scale_fill_manual(values = c("In-sample" = "steelblue", "Out-of-sample" = "darkorange")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  print(p)
+}
+
+```
+### Do you see improved performance in the validation samples?
+
+Yes, there is improvement in the validation performance when shrinkage is applied (κ > 0). As the shrinkage factor increases from 0 to 0.5, we see improvement in the out-of-sample Sharpe ratio, suggesting that using  CAPM-implied returns with empirical sample means can lead to more efficient portfolios. Specifically, while κ = 0 (pure CAPM) has a Sharpe ratio of 0.045, increasing κ to 0.25 and 0.50 raises the Sharpe ratio to 0.058 and 0.060, showing the benefits.
+However, as κ reaches 1 (putting full weight on the sample means), out-of-sample performance begins to slowly get worse. The Sharpe ratio drops to 0.057 at κ = 0.75 and then to 0.054 at κ = 1. This suggests that while historical means can be informative, relying on them too heavily introduces noise and reduces the model’s generalization ability. 
+
+## Question 18 
+Based on the table, **the best value of κ is 0.5**. At this level of shrinkage, the out-of-sample Sharpe ratio reaches its highest value of 0.060, outperforming both lower (κ = 0 to 0.25) and higher (κ = 0.75 to 1.0) values. This suggests that combining the CAPM-implied returns with historical sample means in equal proportion provides the most reliable and efficient portfolio performance in validation.
+
+
