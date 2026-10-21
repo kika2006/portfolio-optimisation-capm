@@ -1,7 +1,7 @@
 ---
 title: "Optimal Portfolios: Mean-Variance, CAPM and Shrinkage"
 subtitle: "Maastricht University, eLab Business Case"
-author: "Francisca (Kika) Freixo"
+author: "Francisca Freixo"
 output:
   html_document:
     toc: true

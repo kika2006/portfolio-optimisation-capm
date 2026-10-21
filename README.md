@@ -1,6 +1,6 @@
 # Building Better Stock Portfolios: Mean-Variance, CAPM and Shrinkage
 
-**Author:** Francisca (Kika) Freixo  
+**Author:** Francisca Freixo  
 
 Constructing and back-testing mean-variance optimal portfolios on real stock data, then improving their out-of-sample performance by shrinking sample means toward CAPM-implied returns.
 
