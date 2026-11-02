@@ -1813,7 +1813,7 @@ returns and portfolio optimization. Right now, my stock returns are in
 daily returns, while the risk-free rate is an annualized percentage, so
 I will convert the risk-free rate to daily returns.</p>
 <pre class="r"><code>tickers &lt;- read.csv(&quot;data/teamticker.csv&quot;, header = TRUE)
-symbols &lt;- na.omit(as.character(tickers$D))  # Team D
+symbols &lt;- na.omit(as.character(tickers$D))  # ticker set D
 
 getSymbols(symbols, from = &quot;2003-12-31&quot;)</code></pre>
 <pre><code>##  [1] &quot;SPY&quot;  &quot;DVN&quot;  &quot;EPP&quot;  &quot;LEN&quot;  &quot;ALB&quot;  &quot;UFI&quot;  &quot;SGRP&quot; &quot;HIO&quot;  &quot;CHD&quot;  &quot;B&quot;   

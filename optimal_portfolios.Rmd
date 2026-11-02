@@ -37,7 +37,7 @@ Right now, my stock returns are in daily returns, while the risk-free rate is an
 
 ```{r - Question 9 }
 tickers <- read.csv("data/teamticker.csv", header = TRUE)
-symbols <- na.omit(as.character(tickers$D))  # Team D
+symbols <- na.omit(as.character(tickers$D))  # ticker set D
 
 getSymbols(symbols, from = "2003-12-31")
 prices    <- do.call(merge, lapply(symbols, function(sym) Ad(get(sym))))

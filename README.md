@@ -10,7 +10,7 @@ Constructing and back-testing mean-variance optimal portfolios on real stock dat
 
 ---
 
-## Approach (team of 4)
+## Approach
 1. Download daily stock prices (`quantmod`) and the 3-month T-bill rate (FRED DTB3), then convert to daily excess returns.
 2. **Odd/even day cross-validation**: build portfolios on one half of the data and test them on the other. Two-sample t-tests check how stable the means and volatilities are.
 3. **Mean-variance optimisation** with `quadprog`, with and without short-selling.
